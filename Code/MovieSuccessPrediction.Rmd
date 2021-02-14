@@ -1,0 +1,910 @@
+---
+Project title: "Movie Success Prediction"
+author: "Dinesh Kumar Padmanabhan"
+date: "Mar 28, 2020"
+output:
+  
+  html_document:
+    rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+    # number_sections: true
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+    
+---
+
+```{r setup, include=FALSE}
+# some of common options (and the defaults) are: 
+# include=T, eval=T, echo=T, results='hide'/'asis',..., collapse=F, warning=T, message=T, error=T, cache=T, fig.width=6, fig.height=4, fig.dim=c(6,4) #inches, fig.align='left'/'center','right', 
+# knitr::opts_chunk$set(warning = F, results = 'markup', message = F)
+knitr::opts_chunk$set(warning = F, results = 'markup', message = F)
+# knitr::opts_chunk$set(include = F)
+# knitr::opts_chunk$set(echo = TRUE)
+options(scientific=T, digits = 3) 
+# options(scipen=9, digits = 3) 
+# ‘scipen’: integer. A penalty to be applied when deciding to print numeric values in fixed or exponential notation.  Positive values bias towards fixed and negative towards scientific notation: fixed notation will be preferred unless it is more than ‘scipen’ digits wider.
+# use scipen=999 to prevent scientific notation at all times
+```
+
+```{r basic, include=F}
+# use this function to conveniently load libraries and work smoothly with knitting
+# can add quietly=T option to the require() function
+loadPkg = function(pkg, character.only = FALSE) { 
+  if (!character.only) { pkg <- as.character(substitute(pkg)) }
+  pkg <- ifelse(!character.only, as.character(substitute(pkg)) , pkg)  
+  if (!require(pkg,character.only=T, quietly =T)) {  install.packages(substitute(pkg),dep=T); if(!require(pkg,character.only=T)) stop("Package not found") } 
+}
+loadPkg(knitr)
+loadPkg(leaps)
+# unload/detact package when done using it
+unloadPkg = function(pkg, character.only = FALSE) { 
+  if(!character.only) { pkg <- as.character(substitute(pkg)) } 
+  search_item <- paste("package", pkg,sep = ":") 
+  while(search_item %in% search()) { detach(search_item, unload = TRUE, character.only = TRUE) } 
+}
+```
+
+```{r PCA_PCR_xform_fcns}
+PCAxform <- function(df, z=TRUE) { 
+  #' Obtain the dataframe with the Principal Components after the rotation. 
+  #' ELo 201911 GWU DATS
+  #' @param df The dataframe.
+  #' @param z T/F or 0/1 for z-score to be used
+  #' @return The transformed dataframe.
+  #' @examples
+  #' tmp = PCAxform(USArrests,TRUE)
+
+  z = ifelse(z==TRUE || z=="true" || z=="True" || z=="T" || z=="t" || z==1 || z=="1", TRUE, FALSE) # standardize z 
+  if(z) { df = data.frame(scale(df))}  # scale not safe for non-numeric colunms, but PCA requires all variables numerics to begin with.
+  pr.out = prcomp(df,scale=z)
+  df1 = data.frame( as.matrix(df) %*% pr.out$rotation ) # use matrix multiplication in R:  %*% 
+  return(df1)
+}
+# Sample 
+# USArrests.z.pc = PCAxform(USArrests,TRUE)
+# summary(USArrests.z.pc)
+
+PCRxform <- function(df, y, zX=TRUE, zy=FALSE) { 
+  #' Obtain the dataframe with the Principal Components after the rotation for PCRegression. Requires related function PCAxform()
+  #' ELo 201903 GWU DATS
+  #' @param df The dataframe.
+  #' @param y The y-variable column index number(int), or the name of y-variable
+  #' @param zX T/F or 0/1 for z-score used on X-variables
+  #' @param zy T/F or 0/1 for z-score used on the target y-variable
+  #' @return The transformed dataframe.
+  #' @examples
+  #' tmp = PCAxform(USArrests,TRUE)
+
+  # take care of y target
+  zy = ifelse(zy==TRUE || zy=="true" || zy=="True" || zy=="T" || zy=="t" || zy==1 || zy=="1", TRUE, FALSE) # standardize target y
+  if( is.integer(y) ) { # y is integer
+    if( y>length(df) || y<1 ) {
+      print("Invalid column number")
+      return(NULL)
+    }
+    if(zy) { df1 = data.frame( scale(df[y]) ) } else { df1 = df[y] } # save y-var in df1
+    df = df[-y] # remove y-variable in df
+  } else { # y is not integer, so interpret as name
+    if(zy) { df1 = data.frame( scale( df[names(df) == y] ) ) } else { df1 = df[names(df) == y] }
+    df = df[names(df) != y] # remove y-variable in df
+  }
+  if( length(df1)<1 ) {
+    print("Variable name not found in data.frame")
+    return(NULL)
+  }
+  # now transform X-vars
+  zX = ifelse(zX==TRUE || zX=="true" || zX=="True" || zX=="T" || zX=="t" || zX==1 || zX=="1", TRUE, FALSE) # standardize X-vars 
+  df2 = PCAxform(df,zX)
+  df1 = data.frame(df1,df2) # piece them back together
+  return(df1)
+}
+
+```
+
+
+```{r xkablesummary}
+loadPkg(xtable)
+loadPkg(kableExtra)
+loadPkg(stringi)
+
+xkabledply = function(modelsmmrytable, title="Table", digits = 4, pos="left", bso="striped") { 
+  modelsmmrytable %>%
+    xtable() %>% 
+    kable(caption = title, digits = digits) %>%
+    kable_styling(bootstrap_options = bso, full_width = FALSE, position = pos)
+}
+
+xkablesummary = function(df, title="Table: Statistics summary.", digits = 4, pos="left", bso="striped") { 
+  s = summary(df) %>%
+    apply( 2, function(x) stringr::str_remove_all(x,c("Min.\\s*:\\s*","1st Qu.\\s*:\\s*","Median\\s*:\\s*","Mean\\s*:\\s*","3rd Qu.\\s*:\\s*","Max.\\s*:\\s*")) ) %>% # replace all leading words
+    apply( 2, function(x) stringr::str_trim(x, "right")) # trim trailing spaces left
+  
+  colnames(s) <- stringr::str_trim(colnames(s))
+  
+  if ( dim(s)[1] ==6 ) { rownames(s) <- c('Min','Q1','Median','Mean','Q3','Max') 
+  } else if ( dim(s)[1] ==7 ) { rownames(s) <- c('Min','Q1','Median','Mean','Q3','Max','NA') }
+  
+  xkabledply(s, title=title, digits = digits, pos=pos, bso=bso )
+}
+
+xkablevif = function(model, title="VIFs of the model", digits = 3, pos="left", bso="striped") { 
+  vifs = table( names(model$coefficients)[2:length(model$coefficients)] ) # remove intercept to set column names
+  vifs[] = faraway::vif(model) # set the values
+  xkabledply( vifs, title=title, digits = digits, pos=pos, bso=bso )
+}
+
+```
+
+
+```{r}
+loadPkg('reshape2')
+loadPkg('GGally')
+loadPkg('ggplot2')
+```
+
+
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(tidyr)
+library(rworldmap)
+library(classInt)
+library(RColorBrewer)
+library(ggrepel)
+library(ggthemes)
+library(scales)
+library(data.table)
+library(formattable)
+library(plotly)
+library(corrplot)
+library(caret)
+library(car)
+```
+
+### Internet Movie Database (IMDB)  Dataset
+<body style = "font-family:Georgia">
+<span style = "color:olive">Prelude:</span>
+
+What makes movies good or bad? Is it our emotional response towards them? Is it the critical reviews or the scores? Is it the association of popular directors or actors? Is it the amount they gross at the box office? What is it really that describes their success or failure? I have pondered over such questions many a times but never really got around to acknowledge them. Thus, when this project came along, I used it as an opportunity to try to find some answers this time around.Dataset can be downloaded here:
+https://data.world/data-society/imdb-5000-movie-dataset
+
+# Dataset Structure
+```{r}
+movies <- read_csv("movie_metadata.csv")
+str(movies)
+```
+
+# Data cleansing 
+Missing Values
+```{r}
+#Checking missing values
+sum(is.na(movies))
+colSums(is.na(movies))
+```
+Proportion of Missing Values
+```{r}
+#Lot of missing values
+mean(is.na(movies))
+```
+Discard Missing Values
+```{r}
+#Missing values are not in large proportion, so we can discard them without any fear.
+movies <- na.omit(movies)
+```
+**Summary**  
+```{r}
+xkablesummary(movies)
+```
+**Removed Columns Based on Nearzerovariance**
+```{r}
+#We find that colour and language are 2 such nearzero variables, so we exclude them during our prediction process.
+#before any prediction, we should do exploratory analysis and visualisations.
+nearZeroVar(movies, saveMetrics = T)
+table(movies$color)
+table(movies$language)
+```
+
+### Exploratory Data Analysis
+**Univariate analysis**
+*Pair plots 1*
+```{r}
+library(ggplot2)
+library(GGally)
+#Dataframe without character and factor features for prediction.
+movies_df <- movies[, c(3, 4, 5, 6, 8, 9, 13, 14, 16, 19, 23, 24, 25, 26, 27, 28)]
+
+ggpairs(movies_df, diag = list(continuous = "density", discrete = "bar"), axisLabels = "internal")
+```
+
+*Pair plots 2*
+```{r}
+loadPkg(psych)
+loadPkg('dplyr')
+pairs.panels(movies_df, 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB", # set histogram color, can use "#22AFBB", "red",
+             density = TRUE,  # show density plots
+             ellipses = TRUE # show correlation ellipses
+             )
+unloadPkg(psych)
+```
+
+**Scatter Plots**
+*IMDB_score v/s critic_reviews**
+```{r}
+ggplot(data = movies, aes( x= num_critic_for_reviews, y = imdb_score)) + 
+  geom_point(shape =20, color = "blue" ) +
+  geom_smooth(method=lm,  linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Critic_Reviews and IMDB_Score",
+        x="Critic Reviews",
+        y = "IMDB_Score")
+  
+  sp <-ggplot(data = movies, aes( x= num_critic_for_reviews, y = imdb_score)) + 
+  geom_point()
+  sp+geom_density_2d()
+```
+
+*IMDB_score v/s Voted_users*
+```{r}
+ggplot(data = movies, aes( x= num_voted_users, y = imdb_score))+ 
+  geom_point(shape = 20, color = "blue") +
+  geom_smooth(method = lm, linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Critic_Reviews and IMDB_Score",
+        x="Critic Reviews",
+        y = "IMDB_Score")
+  
+sp <- ggplot(data = movies, aes( x= num_voted_users, y = imdb_score))  + 
+  geom_point()
+  sp+geom_density_2d()
+  
+#sp + stat_density_2d(aes(fill = ..level..), geom="polygon")
+#sp + stat_density_2d(aes(fill = ..level..), geom="polygon")+
+  #scale_fill_gradient(low="blue", high="red")
+```
+
+*IMDB_score v/s User_reviews*
+```{r}
+ggplot(data = movies, aes( x= num_user_for_reviews, y = imdb_score)) + 
+  geom_point(shape =20, color = "blue" ) +
+  geom_smooth(method=lm,  linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Actor and IMDB_Score",
+        x="User_reviews",
+        y = "IMDB_Score")
+  
+sp <-ggplot(data = movies, aes( x= num_user_for_reviews, y = imdb_score)) + 
+geom_point()
+  sp+geom_density_2d()
+```
+
+*IMDB_score v/s Movie_facebook_likes*
+```{r}
+ggplot(data = movies, aes( x= movie_facebook_likes, y = imdb_score)) + 
+  geom_point(shape =20, color = "blue" ) +
+  geom_smooth(method=lm,  linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Actor and IMDB_Score",
+        x="Movie FB likes",
+        y = "IMDB_Score")
+  
+sp <-ggplot(data = movies, aes( x= movie_facebook_likes, y = imdb_score)) + 
+geom_point()
+  sp+geom_density_2d()
+```
+
+**Histograms**
+```{r}
+ggplot(movies,aes(x=imdb_score))+
+  geom_histogram(binwidth=1,aes(y=..count..),fill="green4")
+
+ggplot(data=movies,aes(x = title_year))+geom_histogram(binwidth=1)
+
+ggplot(movies,aes(x=duration))+
+  geom_histogram(binwidth=5,aes(y=..density..),fill="green4")
+
+ggplot(movies,aes(x=num_user_for_reviews))+
+  geom_histogram(binwidth=50,aes(y=..density..),fill="red")
+
+ggplot(movies,aes(x=director_facebook_likes))+
+  geom_histogram(binwidth=5,aes(y=..count..),fill="red")
+
+ggplot(movies,aes(x=actor_2_facebook_likes))+
+  geom_histogram(binwidth=5,aes(y=..count..),fill="red")
+
+ggplot(movies,aes(x=actor_1_facebook_likes))+
+  geom_histogram(binwidth=5,aes(y=..count..),fill="red")
+
+ggplot(movies,aes(x=actor_3_facebook_likes))+
+  geom_histogram(binwidth=5,aes(y=..count..),fill="red")
+```
+
+**Bivariate analysis**
+*Top 10 Director with most movies*
+```{r}
+directors <- as.data.frame(table(movies$director_name))
+directors <- arrange(directors, desc(Freq))
+ggplot(head(directors, 10), aes(x = reorder(factor(Var1), Freq), y = Freq, alpha = Freq)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Directors", y = "Number of movies") + 
+  ggtitle("Top 10 directors with most movies") + 
+  coord_flip() + 
+  theme_classic()
+```
+
+*Top 10 Directors with highest average IMDB movies*
+```{r}
+movies%>%
+  group_by(director_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+```
+
+**Top 10 Actors with most movies**
+```{r}
+actors <- as.data.frame(table(movies$actor_1_name))
+actors <- arrange(actors, desc(Freq))
+ggplot(head(actors, 10), aes(x = reorder(factor(Var1), Freq), y = Freq, alpha = Freq)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Actors", y = "Number of movies") + 
+  ggtitle("Top 10 actors with most movies") + 
+  coord_flip() + 
+  theme_dark()
+```
+
+**Top 10 Actors with highest average IMDB movies**
+```{r}
+movies%>%
+  group_by(actor_1_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+
+```
+**Actor2**
+```{r}
+movies%>%
+  group_by(actor_2_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+
+
+```
+**Actor3**
+```{r}
+movies%>%
+  group_by(actor_3_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+```
+**Distribution of Movies of different countries.**
+```{r}
+country <- as.data.frame(table(movies$country))
+ggplot(country, aes(x = reorder(factor(Var1), Freq), y = Freq)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Countries", y = "Number of movies") + 
+  ggtitle("Total number of movies of different countries") + 
+  coord_flip() + 
+  theme_get()
+```
+
+**Distribution of Movies year wise.**
+```{r}
+#Number of movies was high after the year 2000.
+year <- as.data.frame(table(movies$title_year))
+year <- arrange(year, desc(Freq))
+ggplot(year[1:30,], aes(x = reorder(factor(Var1), Freq), y = Freq, alpha = Freq))+ 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Years", y = "Number of movies") + 
+  ggtitle("Total number of movies every year") + 
+  coord_flip() + 
+  theme_dark()
+```
+
+**Ratings given to movies.**
+```{r}
+rating <- as.data.frame(table(movies$content_rating))
+rating <- arrange(rating, desc(Freq))
+ggplot(rating, aes(x = reorder(factor(Var1), Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Contents", y = "Number of movies") + 
+  ggtitle("Number of movies with different content ratings") + 
+  coord_flip() + 
+  theme_light() 
+```
+
+#Did the number of users voted for the movie has impact on imdb score ?
+```{r}
+ggplot(movies,aes(x=num_voted_users))+geom_histogram(binwidth=50000,fill="purple")
+
+movies %>%
+  select(movie_title,num_voted_users,imdb_score)%>%
+  arrange(desc(num_voted_users))%>%
+  ggplot(aes(x=num_voted_users,y=imdb_score,col=cut(imdb_score,5)))+
+  geom_point()+
+  geom_jitter()+
+  labs(title="number of users voted vs Imdb score",col="imdbscore")+
+  theme(legend.position = "bottom")
+
+```
+
+#Did the Imdb Score related to facebook likes?
+**Yes the director facebook likes and movie facebook likes has high impact on imdb scores.**
+```{r}
+movies %>% 
+  ggplot(aes(x=movie_facebook_likes,y=imdb_score))+
+  geom_point(color="purple",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Movie FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=director_facebook_likes,y=imdb_score))+
+  geom_point(color="hotpink",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Director FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=actor_1_facebook_likes,y=imdb_score))+
+  geom_point(color="red4",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Actor1 FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=actor_2_facebook_likes,y=imdb_score))+
+  geom_point(color="maroon",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Actor2 FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=actor_3_facebook_likes,y=imdb_score))+
+  geom_point(color="blue",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Actor3 FB likes vs Score")
+```
+
+#How total casting fb likes & content rating impact the imdb score?
+```{r}
+movies %>% 
+  ggplot(aes(x=cast_total_facebook_likes,y=imdb_score))+
+  geom_point(color="blue",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Cast FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=content_rating,y=imdb_score))+
+  geom_point(color="blue",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Rating vs Score")
+```
+
+**Who got more FB likes** ?
+```{r}
+library(dplyr)
+library(gridExtra)
+options(repr.plot.width=8, repr.plot.height=5) 
+likes<-movies %>% select(movie_title,movie_facebook_likes,director_facebook_likes,actor_1_facebook_likes,actor_2_facebook_likes)%>% 
+  filter(movie_facebook_likes !=0 & director_facebook_likes !=0 & actor_1_facebook_likes!=0 & actor_2_facebook_likes !=0)%>%
+  gather(likes,value,2:5)
+
+l1<-likes%>%filter(likes=="movie_facebook_likes"& value>100000)%>%
+  ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+
+  geom_line(size=2)+
+  coord_polar()+
+  theme_bw() +
+  theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+
+  labs(x="Movie",title="Top Facebook Likes-Movie",y="")
+
+l2<-likes%>%filter(likes=="director_facebook_likes"& value>20000)%>%ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+geom_line(col="blue",size=2)+coord_polar()+theme_bw() +theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+labs(x="Movie",title="Top Facebook Likes-Director",y="")
+        grid.arrange(l1,l2,ncol=2)
+```
+```{r}
+library(dplyr)
+library(gridExtra)
+options(report.plot.width=9,report.plot.height=4)
+l3<-likes%>%filter(likes=="actor_1_facebook_likes"& value>35000)%>%ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+geom_line(col="red",size=2)+coord_polar()+theme_bw() +theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+labs(x="Movie",title="Top Facebook Likes-Actor1",y="")
+l4<-likes%>%filter(likes=="actor_2_facebook_likes"& value>15000)%>%ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+geom_line(col="purple",size=2)+coord_polar()+theme_bw() +theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+labs(x="Movie",title="Top Facebook Likes-Actor2",y="")
+grid.arrange(l3,l4,ncol=2)
+```
+
+```{r}
+library(dplyr)
+library(gridExtra)
+d1<-movies %>% select(director_name,imdb_score)%>%group_by(director_name)%>%summarise(dscore=sum(imdb_score))%>%arrange(desc(dscore))%>%head(10)%>%ggplot(aes(x=factor(director_name,level=director_name),y=dscore))+geom_bar(stat="identity",fill="navyblue")+coord_polar()+labs(x="Director",y="Imdb score")
+d2<-movies %>% select(actor_1_name,imdb_score)%>%group_by(actor_1_name)%>%summarise(a1score=sum(imdb_score))%>%arrange(desc(a1score))%>%head(10)%>%ggplot(aes(x=factor(actor_1_name,level=actor_1_name),y=a1score))+geom_bar(stat="identity",fill="green4")+coord_polar()+labs(x="Actor",y="Imdb score")
+d3<-movies %>% select(actor_2_name,imdb_score)%>%group_by(actor_2_name)%>%summarise(a2score=sum(imdb_score))%>%arrange(desc(a2score))%>%head(10)%>%ggplot(aes(x=factor(actor_2_name,level=actor_2_name),y=a2score))+geom_bar(stat="identity",fill="magenta4")+coord_polar()+labs(x="Actor2",y="Imdb score")
+
+d4<-movies %>% select(actor_3_name,imdb_score)%>%group_by(actor_3_name)%>%summarise(a3score=sum(imdb_score))%>%arrange(desc(a3score))%>%head(10)%>%ggplot(aes(x=factor(actor_3_name,level=actor_3_name),y=a3score))+geom_bar(stat="identity",fill="gold4")+coord_polar()+labs(x="Actor",y="Imdb score")
+grid.arrange(d1,d2,d3,d4,nrow=2,ncol=2,top="Popular director & actors per Imdb score")
+
+```
+
+
+
+
+**correlation analysis:**
+```{r}
+num = sapply(movies, is.numeric)
+fact = sapply(movies, is.factor)
+imdb_numeric = movies[, num]
+imdb_factor = movies[, fact]
+
+M<- cor(na.omit(imdb_numeric), use="complete.obs", method="pearson")
+corrplot(M, method="circle")
+
+movie<-movies
+genres <-movie$genres
+genre_df <- movie %>% separate_rows(genres, sep = "\\|") %>% group_by(trimws(genres, which= c("both"))) %>% 
+summarise(Ratings = mean(imdb_score)) %>% 
+arrange(desc(Ratings))
+
+genre_number <-  movie %>% 
+separate_rows(genres, sep = "\\|") %>% 
+group_by(trimws(genres, which= c("both"))) %>% 
+summarise(Number_of_movies = n()) %>% 
+arrange(desc(Number_of_movies))
+
+country_rating <- movie %>% 
+separate_rows(country, sep = "\\|") %>% 
+group_by(country=trimws(country, which= c("both"))) %>% 
+summarise(Ratings = mean(imdb_score)) %>% 
+arrange(desc(Ratings))
+
+
+country_number <- movie %>% separate_rows(country, sep = "\\|") %>% group_by(country=trimws(country, which= c("both"))) %>% 
+summarise(Number_of_movies = n()) %>% 
+arrange(desc(Number_of_movies))
+
+country_number_data<- head(country_number, 50)
+country_rating_data <-head(country_rating, 50)
+
+
+
+#country_data contains name and number of movies for top 15 countries with max number of movies 
+sPDF <- joinCountryData2Map( country_number_data
+                             ,joinCode='NAME'
+                             ,nameJoinColumn = "country"
+                             ,verbose = TRUE )
+
+ratingMap<- joinCountryData2Map(country_rating_data, joinCode = 'NAME'
+                                , nameJoinColumn = "country"
+                                ,verbose=TRUE)
+
+mapDevice() #create world map shaped window
+#14 is minimum number and 3807 is max
+mapCountryData(sPDF,nameColumnToPlot = "Number_of_movies")
+mapDevice()
+mapCountryData(ratingMap, nameColumnToPlot = "Ratings")
+```
+
+### Principal Component Analysis
+```{r}
+apply(movies_df , 2, mean)
+apply(movies_df , 2, var)
+summary(movies_df)
+cor(movies_df)
+cov(movies_df)
+#compare to the matrices after standardization
+moviesscale = data.frame(scale(movies_df))
+cor(moviesscale)
+```
+
+```{r}
+pr.out =prcomp(movies_df , scale =TRUE) # center=TRUE is the default
+summary(pr.out)
+pr.out$rotation
+```
+
+##Plots
+```{r, results='show'}
+biplot(pr.out, scale = 0) 
+```
+let us look at the correlation and covariance matrices after the rotations, for both cases with one using z-score.
+
+```{r pcaxform_results1}
+movies_df.pc = PCAxform(movies_df,FALSE)
+summary(movies_df.pc)
+cor(movies_df.pc)
+cov(movies_df.pc)
+```
+
+```{r}
+#Let us plot the cumulation of variance using the sd
+pr.var <- (pr.out$sdev^2)
+pve <- pr.var/sum(pr.var)
+plot(cumsum(pve), xlab="Principal Component (standardized)", ylab ="Cumulative Proportion of Variance Explained",ylim=c(0,1),type="b")
+``` 
+
+## Princiapl Component Regression
+```{r}
+#We can also use ggplot to vis the output
+# install.packages("devtools")
+# loadPkg("devtools")
+# install_github("ggbiplot", "vqv")
+# loadPkg("ggbiplot")
+# g <- ggbiplot(pr.out,2:3, obs.scale = 1, var.scale = 1, ellipse = TRUE,circle = TRUE)
+# print(g)
+```
+
+## Principal Component Regression
+```{r}
+#install.packages("pls")
+loadPkg(pls)
+#install.packages("mice")
+loadPkg(mice)
+
+pcr.fit=pcr(imdb_score~.,data=movies_df,scale=TRUE,validation ="CV")
+head(movies_df)
+summary(pcr.fit)
+```
+
+```{r, results='show', include=T}
+pcr.fit$coefficients[1:15,1,'1 comps'] # only one coefficient for PC1, but expressed in the original variables coefficients.
+# pcr.fit$coefficients[1:8,1,'3 comps'] # three coefficients for PC1, PC2, and PC3, but expressed in the original variables coefficients.
+# #
+# pcr.fit$fitted.values[1:5,1,'1 comps'] # the fitted values. Showing only the first five here.
+# pcr.fit$fitted.values[1:5,1,'3 comps']
+```
+## Transforming components
+**Getting the transformed values**
+```{r}
+moviesscaled.pc = PCRxform(moviesscale,"imdb_score",TRUE) 
+head(moviesscaled.pc)
+```
+**Validations**
+We can check and see where are mean square error prediction is the lowest:
+```{r}
+validationplot(pcr.fit ,val.type="MSEP",legend="topright")
+```
+
+### Modeling
+## Linear Regression
+```{r}
+# get the set of numeric attributes
+numeric_attributes<-sapply(movies,is.numeric)
+
+#attributes containing only numeric data
+movies_numeric <- movies[,numeric_attributes]
+
+#removing missing values
+movies_missing_removed <- na.omit(movies_numeric)
+
+
+#movie_data scaled
+scaled_movie_data <- data.frame(lapply(movies_missing_removed, function(x) scale(x, center = FALSE, scale = max(x, na.rm = TRUE))))  
+
+index_start<- 1:nrow(scaled_movie_data)
+
+#For 50-50
+#splitting into training and test data 
+index_test50 <- sample(index_start, trunc(length(index_start)*0.50))
+test_data50 <- scaled_movie_data[index_test50,]
+
+index_train50 <- sample(index_start, trunc(length(index_start)*0.50))
+
+train_data50 <- scaled_movie_data[index_train50,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data50)
+
+#applying the model created on test data to obtain predictions
+linear_predictions1 <- predict(linear_model, test_data50)
+
+#plot(linear_predictions,test_data50$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data50$imdb_score - linear_predictions1)^2) 
+
+
+#For 60-40
+#splitting into training and test data 
+index_test40 <- sample(index_start, trunc(length(index_start)*0.40))
+test_data40 <- scaled_movie_data[index_test40,]
+
+index_train60 <- sample(index_start, trunc(length(index_start)*0.60))
+
+train_data60 <- scaled_movie_data[index_train60,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data60)
+
+#applying the model created on test data to obtain predictions
+linear_predictions2 <- predict(linear_model, test_data40)
+
+#plot(linear_predictions,test_data40$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data40$imdb_score - linear_predictions2)^2) 
+
+#For 75-25
+#splitting into training and test data 
+index_test25 <- sample(index_start, trunc(length(index_start)*0.25))
+test_data25 <- scaled_movie_data[index_test25,]
+
+index_train75 <- sample(index_start, trunc(length(index_start)*0.75))
+
+train_data75 <- scaled_movie_data[index_train75,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data75)
+
+#applying the model created on test data to obtain predictions
+linear_predictions3 <- predict(linear_model, test_data25)
+
+#plot(linear_predictions,test_data25$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data25$imdb_score - linear_predictions3)^2) 
+
+
+#For 80-20
+#splitting into training and test data 
+index_test20 <- sample(index_start, trunc(length(index_start)*0.20))
+test_data20 <- scaled_movie_data[index_test20,]
+
+index_train80 <- sample(index_start, trunc(length(index_start)*0.80))
+
+train_data80 <- scaled_movie_data[index_train80,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data80)
+
+#applying the model created on test data to obtain predictions
+linear_predictions4 <- predict(linear_model, test_data20)
+
+#plot(linear_predictions,test_data20$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data20$imdb_score - linear_predictions4)^2) 
+
+par(mfrow=c(2,2))
+plot(linear_predictions1,test_data50$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual", main="Test data 50")
+plot(linear_predictions2,test_data40$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual", main= "Test data 40")
+plot(linear_predictions3,test_data25$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual", main="Test data 25")
+plot(linear_predictions4,test_data20$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual",main="Test data 20")
+
+```
+
+## KNN- Means
+```{r}
+movies_numeric <- movies[,numeric_attributes]
+str(movies_numeric)
+
+#Normalization
+normalize <- function(x) {
+return ((x - min(x)) / (max(x) - min(x))) }
+
+#Data Normalization
+movies_numeric.n <- as.data.frame(lapply(movies_numeric[,-14], normalize))
+head(movies_numeric.n)
+
+#Data Splicing
+set.seed(1000)
+dat.d <- sample(1:nrow(movies_numeric.n),size=nrow(movies_numeric.n)*0.7,replace = FALSE) #random selection of 70% data.
+ 
+train.movies <- movies_numeric[dat.d,] # 70% training data
+test.movies <- movies_numeric[-dat.d,] # remaining 30% test data
+
+#Creating seperate dataframe for 'Imdb' feature which is our target.
+train.movies_labels <- movies_numeric[dat.d,14, drop = TRUE]
+test.movies_labels <-movies_numeric[-dat.d,14, drop = TRUE]
+
+#Building a Machine Learning model
+# Load class package
+library(class)
+NROW(train.movies_labels) 
+
+#we have 2629 observations in our training data set. 
+#The square root of 2629 is around 51.27, therefore we’ll create two models. 
+# One with ‘K’ value as 51 and the other model with a ‘K’ value as 52.
+knn.51 <- knn(train=train.movies, test=test.movies, cl=train.movies_labels, k=51)
+knn.52 <- knn(train=train.movies, test=test.movies, cl=train.movies_labels, k=51)
+
+#Model Evaluation
+#Calculate the proportion of correct classification for k = 51, 52]
+ACC.51 <- 100 * sum(test.movies_labels == knn.51)/NROW(test.movies_labels)
+ACC.52 <- 100 * sum(test.movies_labels == knn.52)/NROW(test.movies_labels)
+ 
+#Check prediction against actual value in tabular form for k=51 and 52
+table(knn.51 ,test.movies_labels)
+table(knn.52 ,test.movies_labels)
+
+```
+
+## Support Vector Machine  
+```{r}
+library("e1071")
+
+# Convert title_year from numeric to factor type since we don't consider this attribute for prediction
+movies$title_year = as.factor(movies$title_year)
+
+#Extract only the numeric data columns
+number_attributes <- sapply(movies,is.numeric)
+number_attributes
+movies_num <- movies[,number_attributes]     # movies_num contains only numeric data
+hist(movies$imdb_score, breaks=30)
+plot(density(movies$imdb_score))
+abline(v=mean(movies$imdb_score), lty=2)  
+
+# Now we know that most scores lie between somewhere close to 6 and 7.5
+movies_1 <- na.omit(movies_num)    #Remove the rows with missing values
+scaled_data <- data.frame(lapply(movies_1, function(x) scale(x, center = FALSE, scale = max(x, na.rm = TRUE))))                         #Scale the data
+scaled_data$imdb_score = movies_1$imdb_score / 10
+scaled_data <- scaled_data[,c("imdb_score","director_facebook_likes","duration","actor_1_facebook_likes","actor_2_facebook_likes","actor_3_facebook_likes","facenumber_in_poster","budget")]
+
+index<- 1:nrow(scaled_data)
+index_test <- sample(index, trunc(length(index)*0.25))
+index_test1 <- sample(index, trunc(length(index)*0.2))
+index_test2 <- sample(index, trunc(length(index)*0.4))
+index_test3 <- sample(index, trunc(length(index)*0.5))
+# Split the data to train and test set
+test_data <- scaled_data[index_test,]
+train_data <- scaled_data[-index_test,]
+
+# Create a model using SVM
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "radial")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "linear")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "sigmoid")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "polynomial")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "radial", gamma = 0.5)
+svm_pred <-svm(imdb_score ~., data = train_data, kernel = "radial", gamma = 0.7)
+# Apply the model on test data and get the predicted values
+svm_predictions <- predict(svm_pred, test_data[,-1])
+mean((test_data$imdb_score - svm_predictions)^2)     # Get the mean squared error
+
+test_data1 <- scaled_data[index_test1,]
+train_data1 <- scaled_data[-index_test1,]
+svm_pred1 <-svm(imdb_score ~., data = train_data1, kernel = "radial", gamma = 0.7)
+svm_predictions1 <- predict(svm_pred1, test_data1[,-1])
+mean((test_data1$imdb_score - svm_predictions1)^2)
+
+test_data2 <- scaled_data[index_test2,]
+train_data2 <- scaled_data[-index_test2,]
+svm_pred2 <-svm(imdb_score ~., data = train_data2, kernel = "radial", gamma = 0.7)
+svm_predictions2 <- predict(svm_pred2, test_data2[,-1])
+mean((test_data2$imdb_score - svm_predictions2)^2)
+
+test_data3 <- scaled_data[index_test3,]
+train_data3 <- scaled_data[-index_test3,]
+svm_pred3 <-svm(imdb_score ~., data = train_data3, kernel = "radial", gamma = 0.7)
+svm_predictions3 <- predict(svm_pred3, test_data3[,-1])
+mean((test_data3$imdb_score - svm_predictions3)^2)
+
+# Plot the predicted values v/s actual values
+par(mfrow = c(2,2))
+plot(svm_predictions,test_data$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 75% Test 25%")
+plot(svm_predictions1,test_data1$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 80% Test 20%")
+plot(svm_predictions2,test_data2$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 60% Test 40%")
+plot(svm_predictions3,test_data3$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 50% Test 50%")
+
+```

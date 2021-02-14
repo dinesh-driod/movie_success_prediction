@@ -1,0 +1,933 @@
+---
+Project title: "Movie Success Prediction"
+author: "Dinesh Kumar Padmanabhan"
+date: "Mar 28, 2020"
+output:
+  
+  html_document:
+    rmdformats::readthedown:
+    self_contained: true
+    thumbnails: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+    # number_sections: true
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+    
+---
+
+```{r setup, include=FALSE}
+# some of common options (and the defaults) are: 
+# include=T, eval=T, echo=T, results='hide'/'asis',..., collapse=F, warning=T, message=T, error=T, cache=T, fig.width=6, fig.height=4, fig.dim=c(6,4) #inches, fig.align='left'/'center','right', 
+# knitr::opts_chunk$set(warning = F, results = 'markup', message = F)
+knitr::opts_chunk$set(warning = F, results = 'markup', message = F)
+# knitr::opts_chunk$set(include = F)
+# knitr::opts_chunk$set(echo = TRUE)
+options(scientific=T, digits = 3) 
+# options(scipen=9, digits = 3) 
+# ‘scipen’: integer. A penalty to be applied when deciding to print numeric values in fixed or exponential notation.  Positive values bias towards fixed and negative towards scientific notation: fixed notation will be preferred unless it is more than ‘scipen’ digits wider.
+# use scipen=999 to prevent scientific notation at all times
+```
+
+```{r basic, include=F}
+# use this function to conveniently load libraries and work smoothly with knitting
+# can add quietly=T option to the require() function
+loadPkg = function(pkg, character.only = FALSE) { 
+  if (!character.only) { pkg <- as.character(substitute(pkg)) }
+  pkg <- ifelse(!character.only, as.character(substitute(pkg)) , pkg)  
+  if (!require(pkg,character.only=T, quietly =T)) {  install.packages(substitute(pkg),dep=T); if(!require(pkg,character.only=T)) stop("Package not found") } 
+}
+loadPkg(knitr)
+loadPkg(leaps)
+# unload/detact package when done using it
+unloadPkg = function(pkg, character.only = FALSE) { 
+  if(!character.only) { pkg <- as.character(substitute(pkg)) } 
+  search_item <- paste("package", pkg,sep = ":") 
+  while(search_item %in% search()) { detach(search_item, unload = TRUE, character.only = TRUE) } 
+}
+```
+
+```{r PCA_PCR_xform_fcns}
+PCAxform <- function(df, z=TRUE) { 
+  #' Obtain the dataframe with the Principal Components after the rotation. 
+  #' ELo 201911 GWU DATS
+  #' @param df The dataframe.
+  #' @param z T/F or 0/1 for z-score to be used
+  #' @return The transformed dataframe.
+  #' @examples
+  #' tmp = PCAxform(USArrests,TRUE)
+
+  z = ifelse(z==TRUE || z=="true" || z=="True" || z=="T" || z=="t" || z==1 || z=="1", TRUE, FALSE) # standardize z 
+  if(z) { df = data.frame(scale(df))}  # scale not safe for non-numeric colunms, but PCA requires all variables numerics to begin with.
+  pr.out = prcomp(df,scale=z)
+  df1 = data.frame( as.matrix(df) %*% pr.out$rotation ) # use matrix multiplication in R:  %*% 
+  return(df1)
+}
+# Sample 
+# USArrests.z.pc = PCAxform(USArrests,TRUE)
+# summary(USArrests.z.pc)
+
+PCRxform <- function(df, y, zX=TRUE, zy=FALSE) { 
+  #' Obtain the dataframe with the Principal Components after the rotation for PCRegression. Requires related function PCAxform()
+  #' ELo 201903 GWU DATS
+  #' @param df The dataframe.
+  #' @param y The y-variable column index number(int), or the name of y-variable
+  #' @param zX T/F or 0/1 for z-score used on X-variables
+  #' @param zy T/F or 0/1 for z-score used on the target y-variable
+  #' @return The transformed dataframe.
+  #' @examples
+  #' tmp = PCAxform(USArrests,TRUE)
+
+  # take care of y target
+  zy = ifelse(zy==TRUE || zy=="true" || zy=="True" || zy=="T" || zy=="t" || zy==1 || zy=="1", TRUE, FALSE) # standardize target y
+  if( is.integer(y) ) { # y is integer
+    if( y>length(df) || y<1 ) {
+      print("Invalid column number")
+      return(NULL)
+    }
+    if(zy) { df1 = data.frame( scale(df[y]) ) } else { df1 = df[y] } # save y-var in df1
+    df = df[-y] # remove y-variable in df
+  } else { # y is not integer, so interpret as name
+    if(zy) { df1 = data.frame( scale( df[names(df) == y] ) ) } else { df1 = df[names(df) == y] }
+    df = df[names(df) != y] # remove y-variable in df
+  }
+  if( length(df1)<1 ) {
+    print("Variable name not found in data.frame")
+    return(NULL)
+  }
+  # now transform X-vars
+  zX = ifelse(zX==TRUE || zX=="true" || zX=="True" || zX=="T" || zX=="t" || zX==1 || zX=="1", TRUE, FALSE) # standardize X-vars 
+  df2 = PCAxform(df,zX)
+  df1 = data.frame(df1,df2) # piece them back together
+  return(df1)
+}
+
+```
+
+
+```{r xkablesummary}
+loadPkg(xtable)
+loadPkg(kableExtra)
+loadPkg(stringi)
+
+xkabledply = function(modelsmmrytable, title="Table", digits = 4, pos="left", bso="striped") { 
+  modelsmmrytable %>%
+    xtable() %>% 
+    kable(caption = title, digits = digits) %>%
+    kable_styling(bootstrap_options = bso, full_width = FALSE, position = pos)
+}
+
+xkablesummary = function(df, title="Table: Statistics summary.", digits = 4, pos="left", bso="striped") { 
+  s = summary(df) %>%
+    apply( 2, function(x) stringr::str_remove_all(x,c("Min.\\s*:\\s*","1st Qu.\\s*:\\s*","Median\\s*:\\s*","Mean\\s*:\\s*","3rd Qu.\\s*:\\s*","Max.\\s*:\\s*")) ) %>% # replace all leading words
+    apply( 2, function(x) stringr::str_trim(x, "right")) # trim trailing spaces left
+  
+  colnames(s) <- stringr::str_trim(colnames(s))
+  
+  if ( dim(s)[1] ==6 ) { rownames(s) <- c('Min','Q1','Median','Mean','Q3','Max') 
+  } else if ( dim(s)[1] ==7 ) { rownames(s) <- c('Min','Q1','Median','Mean','Q3','Max','NA') }
+  
+  xkabledply(s, title=title, digits = digits, pos=pos, bso=bso )
+}
+
+xkablevif = function(model, title="VIFs of the model", digits = 3, pos="left", bso="striped") { 
+  vifs = table( names(model$coefficients)[2:length(model$coefficients)] ) # remove intercept to set column names
+  vifs[] = faraway::vif(model) # set the values
+  xkabledply( vifs, title=title, digits = digits, pos=pos, bso=bso )
+}
+
+```
+
+
+```{r}
+loadPkg('reshape2')
+loadPkg('GGally')
+loadPkg('ggplot2')
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(tidyr)
+library(rworldmap)
+library(classInt)
+library(RColorBrewer)
+library(ggrepel)
+library(ggthemes)
+library(scales)
+library(data.table)
+library(formattable)
+library(plotly)
+library(corrplot)
+library(caret)
+library(car)
+```
+
+# Title and Objective of the Study
+
+## Title 
+Movis Success Prediction using social Network Analysis(Facebook)
+
+## Objective
+To investigate how the social network factors influence in success of a movie, and what kind of insights in facebook is most likely to cause success.
+
+## Need of the study ?
+Why none of the leading movie sites use social media to make predictions ?
+
+## Smart Questions
+**1: Popularity of movies Over Years**
+**2: What kinds of properties are associated with movies that have high popularity?**
+**3: Number of movies released year by year**
+**4: Presence of “rich insights” in social networks**
+
+## Business under study
+**Motion Picture Industry**
+
+## Data Sources
+**Internet Movie Database (IMDB)  Dataset**
+The dataset is from Kaggle website. It contains 28 variables for 5043 movies, spanning across 100 years in 66 countries.
+“imdb_score” is the response variable while the other 27 variables are possible predictors. 
+The original dataset has been replaced in Kaggle, here’s the link for the original dataset from Dataworld:
+https://data.world/data-society/imdb-5000-movie-dataset
+
+# Data Preparation and understanding
+
+## Data Extraction and Cleaning
+**Data Extraction**
+```{r}
+movies <- read_csv("movie_metadata.csv")
+str(movies)
+```
+**Missing Value Analysis and Treatment**
+```{r}
+#Checking missing values
+sum(is.na(movies))
+colSums(is.na(movies))
+```
+Proportion of Missing Values
+```{r}
+#Lot of missing values
+mean(is.na(movies))
+```
+Missing values are not in large proportion, so we can discard them without any fear.
+```{r}
+#Discard Missing Values
+movies <- na.omit(movies)
+```
+**Summary**  
+```{r}
+xkablesummary(movies)
+```
+**Removed Columns Based on Nearzerovariance**
+
+We find that colour and language are 2 such nearzero variables, so we exclude them during our prediction process.before any prediction, we should do exploratory analysis and visualisations.
+```{r}
+nearZeroVar(movies, saveMetrics = T)
+table(movies$color)
+table(movies$language)
+```
+
+we don't need character or factor features for prediction, but for exploratory analysis, we do need them.
+
+```{r}
+library(ggplot2)
+library(GGally)
+#Dataframe without character and factor features for prediction.
+movies_df <- movies[, c(3, 4, 5, 6, 8, 9, 13, 14, 16, 19, 23, 24, 25, 26, 27, 28)]
+
+ggpairs(movies_df, diag = list(continuous = "density", discrete = "bar"), axisLabels = "internal")
+```
+**Correlation Parameters**
+
+By plotting a correlation matrix, we have a very nice overview of how the features are related to one another. 
+In this correlation plot, I will use the coorplot library to produce a interactive Pearson correlation matrix via this function as shown below.Below are some of the insights from the correlation:
+− Gross has a higher correlation with the “num_voted_users” and “num_
+critic_for_reviews”.
+− Gross seems to have low correlation with “IMDB_score”. A higher score doesn’t
+mean that movie has done well.
+− Among all the actors Facebook likes, “actor_3_facebook_likes” has a higher
+correlation with the gross.
+− Gross seems to have very low correlation with the “budget”. 
+
+```{r}
+num = sapply(movies, is.numeric)
+fact = sapply(movies, is.factor)
+imdb_numeric = movies[, num]
+imdb_factor = movies[, fact]
+
+M<- cor(na.omit(imdb_numeric), use="complete.obs", method="pearson")
+corrplot(M, method="circle")
+```
+
+From the correlation plots, we can see that quite a lot of our columns seem to be poorly correlated with one another. Generally, when making a predictive model, it would be preferable to train a model with features that are not too correlated with one another so that we do not need to deal with redundant features. In the case that we have quite a lot of correlated features one could perhaps apply a technique such as Principal Component Analysis (PCA) to reduce the feature space.
+
+We can verify that all the above insights made seems to be right. The above graph also shows the effect of one variable over the other. The highest correlation of 0.63 seems to be between “num_voted_users” and “IMDB_score” which probably means movies with higher voted users have a higher score or probably the popular movies have a higher score. Below is the relationship graph of other variables which has minimal impact on each other
+
+```{r}
+loadPkg(psych)
+loadPkg('dplyr')
+pairs.panels(movies_df, 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB", # set histogram color, can use "#22AFBB", "red",
+             density = TRUE,  # show density plots
+             ellipses = TRUE # show correlation ellipses
+             )
+unloadPkg(psych)
+```
+# Exploratory Data Analysis
+
+## Univariate analysis
+**Histograms**
+
+In the last century, it seems that the number of movies produced annually largely increased since 1960. This is understandable since the development of filming industry goes hand in hand with the development of science and technology. But we should be aware that along with the boom of movie industry since 2000, there are many movies with low IMDB score.IMDB Rating towards the movies has increased from the initial years and till now. Here we can see from the chart that IMDB Rating has increased from year to year.Movie production just exploded after year 1990. It could be due to advancement in technology and commercialisation of internet. Also,from the graph, we see there aren’t many records of movies released before 1980
+```{r}
+ggplot(movies,aes(x=imdb_score))+ geom_histogram(binwidth=.5)
+ggplot(data=movies,aes(x = title_year))+ geom_histogram(binwidth=.5)
+ggplot(movies,aes(x=duration))+ geom_histogram(binwidth=10)
+ggplot(movies,aes(x=num_user_for_reviews))+ geom_histogram(binwidth=50)
+```
+**Facebook Likes**
+
+After the evolution of Facebook in 2005, people used to rank the movies in the FB by liking the movies.The Facebook rating of movies have increased over years and people are interested in liking the movies that are impressive. This liking system acts as a medium to say that whether a movie is better or good or average or flop.
+
+```{r}
+ggplot(movies,aes(x=director_facebook_likes))+
+  geom_histogram(binwidth=500,aes(y=..count..),fill="blue")
+
+ggplot(movies,aes(x=actor_1_facebook_likes))+
+  geom_histogram(binwidth=5000,aes(y=..count..),fill="blue")
+
+ggplot(movies,aes(x=actor_2_facebook_likes))+
+  geom_histogram(binwidth=500,aes(y=..count..),fill="blue")
+
+ggplot(movies,aes(x=actor_3_facebook_likes))+
+  geom_histogram(binwidth=500,aes(y=..count..),fill="blue")
+```
+
+**Scatter Plots**
+
+The social network is a good way to estimate the popularity of certain phenomena. Therefore it is interesting to know how does the IMDB score correlate with the movie popularity in the social network. From the scatter plot below, we can find that overall, the movies that have very high facebook likes tend to be the ones that have IMDB scores around 8.0. As we know, IMDB scores of higher than 8.0 are considered as the greatest movies in the IMDB top 250 list. It is interesting to see that those greatest movies do not have the highest facebook popularity.
+
+In data analysis, all selected attributes are analyzed on the basis of different
+factor that help us to gather most accurate outcome for further stages. Selected features for analysis are as follows: critic_reviews, voted_users, user_reviews, and movie_facebook_like. On the basis of these attributes, we are generating variousvisualized graphs for analyzing the best possible attribute among these for further predictions.In our analysis we are generating scatter plot to see the  correlation between IMDB scores and other factors such as critic_reviews, voted_users, user_reviews, and movie_facebook_like. we can see a strong correlation for critic review, voted users and movie facebook likes w.r.t IMBD scores and a weak correlation for user reviews.
+
+**IMDB_score v/s Critic_reviews**
+```{r}
+ggplot(data = movies, aes( x= num_critic_for_reviews, y = imdb_score)) + 
+  geom_point(shape =20, color = "blue" ) +
+  geom_smooth(method=lm,  linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Critic_Reviews and IMDB_Score",
+        x="Critic Reviews",
+        y = "IMDB_Score")
+  
+  sp <-ggplot(data = movies, aes( x= num_critic_for_reviews, y = imdb_score)) + 
+  geom_point()
+  sp+geom_density_2d()
+```
+**IMDB_score v/s Voted_users**
+```{r}
+ggplot(data = movies, aes( x= num_voted_users, y = imdb_score))+ 
+  geom_point(shape = 20, color = "blue") +
+  geom_smooth(method = lm, linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Critic_Reviews and IMDB_Score",
+        x="Critic Reviews",
+        y = "IMDB_Score")
+  
+sp <- ggplot(data = movies, aes( x= num_voted_users, y = imdb_score))  + 
+  geom_point()
+  sp+geom_density_2d()
+```
+**IMDB_score v/s User_reviews**
+```{r}
+ggplot(data = movies, aes( x= num_user_for_reviews, y = imdb_score)) + 
+  geom_point(shape =20, color = "blue" ) +
+  geom_smooth(method=lm,  linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Actor and IMDB_Score",
+        x="User_reviews",
+        y = "IMDB_Score")
+  
+sp <-ggplot(data = movies, aes( x= num_user_for_reviews, y = imdb_score)) + 
+geom_point()
+  sp+geom_density_2d()
+```
+**IMDB_score v/s Movie_facebook_likes**
+```{r}
+ggplot(data = movies, aes( x= movie_facebook_likes, y = imdb_score)) + 
+  geom_point(shape =20, color = "blue" ) +
+  geom_smooth(method=lm,  linetype="dashed",
+             color="darkred", fill="blue")
+  labs (title="Scatter Plot of Actor and IMDB_Score",
+        x="Movie FB likes",
+        y = "IMDB_Score")
+  
+sp <-ggplot(data = movies, aes( x= movie_facebook_likes, y = imdb_score)) + 
+geom_point()
+  sp+geom_density_2d()
+```
+
+## Bivariate analysis
+
+An actor, actress, or director who has an highest IMDB_score is a great motivation to analyze movie success. Movie which has highest IMDB_score has the same weight as an actor or a director in making a movie popular.
+
+**Top 10 Director with most movies**
+
+Here we have listed top 10 directors of all time based upon their success over their movies.From the below story line, we are able to see that Steven Spielberg is the legendary person when compared to all the directors. Next to Steven Spielberg is Michael Bay and Next person who comes to the list is Tim Burton.
+
+```{r}
+directors <- as.data.frame(table(movies$director_name))
+directors <- arrange(directors, desc(Freq))
+ggplot(head(directors, 10), aes(x = reorder(factor(Var1), Freq), y = Freq, alpha = Freq)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Directors", y = "Number of movies") + 
+  ggtitle("Top 10 directors with most movies") + 
+  coord_flip() + 
+  theme_classic()
+```
+
+**Top 10 Directors with highest average IMDB movies**
+
+On the contrary, listed top 10 directors of all time based upon their highest average imdb score.From the below story line, we are able to see that Akira kurosawa Japense film director and screen writer topping the list. Next to Akira kurosawa is Charles Chaplin and Next person who comes to the list is Tony Kaye.
+
+```{r}
+movies%>%
+  group_by(director_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+```
+
+**Top 10 Main Actors with most movies**
+
+Here we have listed top 10 main actors of all time based upon their success over their movies.From the below story line, we are able to see that Robert De Niro is the legendary actor when compared to all the actors. Next to Robert De Niro is Johnny Depp and Next person who comes to the list is Nicolas Cage.
+
+```{r}
+actors <- as.data.frame(table(movies$actor_1_name))
+actors <- arrange(actors, desc(Freq))
+ggplot(head(actors, 10), aes(x = reorder(factor(Var1), Freq), y = Freq, alpha = Freq)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Actors", y = "Number of movies") + 
+  ggtitle("Top 10 actors with most movies") + 
+  coord_flip() + 
+  theme_dark()
+```
+
+**Top 10 Main Actors with highest average IMDB movies**
+
+On the contrary, listed top 10 actors of all time based upon their highest average imdb score.From the below story line, we are able to see that Scatman Crothers topping the list. Next to Scatman Crothers is Takashi Shimura and Next person who comes to the list is Bunta Sugawara.
+
+```{r}
+movies%>%
+  group_by(actor_1_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+
+```
+
+**Top 10 Supporting Actors_2 with highest average IMDB movies**
+
+Here we have listed top 10 supporting actors of all time based upon their success over their movies.From the below story line, we are able to see that Caroline Goodall  is the legendary person when compared to all the supporting actors. Next to Caroline Goodall is Enzo Petito   and Next person who comes to the list is Phil LaMarr.
+
+```{r}
+movies%>%
+  group_by(actor_2_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+
+```
+
+**Top 10 Supporting Actors_3 with highest average IMDB movies**
+
+Here we have listed top 10 directors of all time based upon their highest average imdb score.From the below story line, we are able to see that Akira kurosawa Japense film director and screen writer topping the list. Next to Akira kurosawa is Charles Chaplin and Next person who comes to the list is Tony Kaye.
+
+```{r}
+movies%>%
+  group_by(actor_3_name) %>%
+  summarise(Highest_avg_imdb_score = mean(imdb_score)) %>%
+  arrange(desc(Highest_avg_imdb_score)) %>%
+  top_n(10, Highest_avg_imdb_score) %>%
+  formattable(list(Highest_avg_imdb_score = color_bar("orange")), align = 'l')
+```
+
+**Distribution of Movies of different countries.**
+
+USA and UK are the two countries that produced the most number of movies in the past century, including a large amount of bad movies. The median IMDB scores for both USA and UK are, however, not the highest among all countries. Some developing countries, such as Libya, Iran, Brazil, and Afghanistan, produced a small amount of movies with high median IMDB scores. From the below plot, we are able to say that USA stands a pioneer in the movie business and they stand tall and firm with different variety of movies, towards attracting the world audience than any other countries in the world.
+
+```{r}
+country <- as.data.frame(table(movies$country))
+ggplot(country, aes(x = reorder(factor(Var1), Freq), y = Freq)) + 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Countries", y = "Number of movies") + 
+  ggtitle("Total number of movies of different countries") + 
+  coord_flip() + 
+  theme_get()
+```
+
+**Distribution of Movies year wise.**
+
+In the last century, it seems that the number of movies produced annually largely increased since 1960. This is understandable since the development of filming industry goes hand in hand with the development of science and technology. But we should be aware that along with the boom of movie industry since 2000, there are many movies with low IMDB score.
+
+```{r}
+
+year <- as.data.frame(table(movies$title_year))
+year <- arrange(year, desc(Freq))
+ggplot(year[1:30,], aes(x = reorder(factor(Var1), Freq), y = Freq, alpha = Freq))+ 
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Years", y = "Number of movies") + 
+  ggtitle("Total number of movies every year") + 
+  coord_flip() + 
+  theme_dark()
+```
+
+**Ratings given to movies.**
+
+From the below graph, we are able to see that R is the content rating for the top grossing movies from USA.Next to that we have content rating PG-13 that stands second and comes from USA followed by PG. PG-13 comes from UK directed top box office hit films.
+
+```{r}
+rating <- as.data.frame(table(movies$content_rating))
+
+rating <- arrange(rating, desc(Freq))
+ggplot(rating, aes(x = reorder(factor(Var1), Freq), y = Freq)) +
+  geom_bar(stat = "identity", fill = "blue") + 
+  labs(x = "Contents", y = "Number of movies") + 
+  ggtitle("Number of movies with different content ratings") + 
+  coord_flip() + 
+  theme_light() 
+```
+
+**Did the number of users voted for the movie has impact on imdb score**
+
+We divide this scatter plot by number of users voted. Movie with extremely high Facebook likes tend to have higher imdb score. But the score for movie with low Facebook likes vary in a very wide range.
+
+```{r}
+ggplot(movies,aes(x=num_voted_users))+
+  geom_histogram(binwidth=50000,fill="purple")
+
+movies %>%
+  select(movie_title,num_voted_users,imdb_score)%>%
+  arrange(desc(num_voted_users))%>%
+  ggplot(aes(x=num_voted_users,y=imdb_score,col=cut(imdb_score,5)))+
+  geom_point()+
+  geom_jitter()+
+  labs(title="number of users voted vs Imdb score",col="imdbscore")+
+  theme(legend.position = "bottom")
+
+```
+
+
+**Does the Imdb Score related to facebook likes?**
+
+Yes the director facebook likes and movie facebook likes has high impact on imdb scores.After the evolution of Facebook in 2005, people used to rank the movies in the FB by liking the movies.The Facebook rating of movies have increased over years and people are interested in liking the movies that are impressive. This liking system acts as a medium to say that whether a movie is better or good or average or flop. It is plausible to believe that the greatness of a movie is highly affected by its director and actors/actresses. How does the movie IMDB scores compare with the director facebook popularity? From the plot below, it can be seen that the directors who directed movies of rating higher than 6.0 tend to have more facebook popularity than the ones who directed movies of rating lower than 6.0. And I listed the top four directors who have the most number of facebook popularity (Christopher Nolan, David Fincher, Martin Scorsese, and Quentin Tarantino), along with their four representative movies.
+
+```{r}
+movies %>% 
+  ggplot(aes(x=movie_facebook_likes,y=imdb_score))+
+  geom_point(color="purple",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Movie FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=director_facebook_likes,y=imdb_score))+
+  geom_point(color="hotpink",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Director FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=actor_1_facebook_likes,y=imdb_score))+
+  geom_point(color="red4",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Actor1 FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=actor_2_facebook_likes,y=imdb_score))+
+  geom_point(color="maroon",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Actor2 FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=actor_3_facebook_likes,y=imdb_score))+
+  geom_point(color="blue",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Actor3 FB likes vs Score")
+```
+
+
+**How total casting fb likes & content rating impact the imdb score?**
+
+The top first actor/actress has the most number of facebook popularity, while the second and the third actor/actress have much lower popularity. But it can also be shown that, high facebook popularity of the leading actor/actress does not mean that a movie is of high rating.
+
+```{r}
+movies %>% 
+  ggplot(aes(x=cast_total_facebook_likes,y=imdb_score))+
+  geom_point(color="blue",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Cast FB likes vs Score")
+
+movies %>% 
+  ggplot(aes(x=content_rating,y=imdb_score))+
+  geom_point(color="blue",alpha=0.4)+
+  theme(legend.position="bottom",plot.title = element_text(size=8))+
+  labs(title="Rating vs Score")
+```
+
+**Who got more FB likes?** 
+
+Christopher Nolan, George Lucas, James Cameron, Joss Wheldon, Michael Bay, Peter Jackson, Robert Zemeckis, Sam Raimi, Steven Spielberg, Tim Burton are the top 10 directors in the movie history. Christopher Nolan has directed 8 massive hit movies. It includes Interstellar, The Dark Knight Rises, Inception, and so on. He made a significant impact towards handling the movie with creativity and perfectionism which gives any of the audience a goose bumps. Then comes George Lucas the director of Star Wars series. Next person to the list is James Cameron known for the outstanding film ‘Avatar’, ’Titanic’, ’Terminator Series’. He stands one among the top 10 directors.Peter Jackson movies include ‘Lord of the ring’, ’Hobbit series’ have made huge massive hit in Hollywood.
+We have mentioned the following directors as the top directors based upon their facebook likes for the movies they directed.
+
+```{r}
+library(dplyr)
+library(gridExtra)
+options(repr.plot.width=8, repr.plot.height=5) 
+likes<-movies %>% select(movie_title,movie_facebook_likes,director_facebook_likes,actor_1_facebook_likes,actor_2_facebook_likes)%>% 
+  filter(movie_facebook_likes !=0 & director_facebook_likes !=0 & actor_1_facebook_likes!=0 & actor_2_facebook_likes !=0)%>%
+  gather(likes,value,2:5)
+
+l1<-likes%>%filter(likes=="movie_facebook_likes"& value>100000)%>%
+  ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+
+  geom_line(size=2)+
+  coord_polar()+
+  theme_bw() +
+  theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+
+  labs(x="Movie",title="Top Facebook Likes-Movie",y="")
+
+l2<-likes%>%filter(likes=="director_facebook_likes"& value>20000)%>%
+  ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+
+  geom_line(col="blue",size=2)+
+  coord_polar()+
+  theme_bw() +
+  theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+
+  labs(x="Movie",title="Top Facebook Likes-Director",y="")
+        grid.arrange(l1,l2,ncol=2)
+
+options(report.plot.width=9,report.plot.height=4)
+l3<-likes%>%
+  filter(likes=="actor_1_facebook_likes"& value>35000)%>%
+  ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+
+  geom_line(col="red",size=2)+
+  coord_polar()+
+  theme_bw() +
+  theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+
+  labs(x="Movie",title="Top Facebook Likes-Actor1",y="")
+
+l4<-likes%>%filter(likes=="actor_2_facebook_likes"& value>15000)%>%
+  ggplot(aes(x=factor(movie_title),y=value,group=likes,color=likes))+
+  geom_line(col="purple",size=2)+
+  coord_polar()+
+  theme_bw() +
+  theme(axis.text.x = element_text(
+      vjust=50),legend.position = "bottom")+
+  labs(x="Movie",title="Top Facebook Likes-Actor2",y="")
+grid.arrange(l3,l4,ncol=2)
+
+```
+
+
+
+
+
+
+# Principal Component Analysis
+
+PCA shown below reveals more information than the correlation matrix. For the 15 continuous variables, we can see their relationship with the three principal components in space. 
+
+```{r}
+apply(movies_df , 2, mean)
+apply(movies_df , 2, var)
+moviesscale = data.frame(scale(movies_df))
+cor(moviesscale)
+pr.out =prcomp(movies_df , scale =TRUE) # center=TRUE is the default
+summary(pr.out)
+pr.out$rotation
+```
+## Plots
+
+The points denotes all the movies. We can see that some variable vectors tend to cluster and point at similar directions, meaning that those 15 variables have multicollinearity between some variable pairs. This may lead to problem when we want to fit linear regression model to predict movie rating.
+
+```{r, results='show'}
+biplot(pr.out, scale = 0) 
+```
+
+```{r pcaxform_results1}
+movies_df.pc = PCAxform(movies_df,FALSE)
+```
+
+**Let us plot the cumulation of variance using the sd**
+
+```{r}
+pr.var <- (pr.out$sdev^2)
+pve <- pr.var/sum(pr.var)
+plot(cumsum(pve), xlab="Principal Component (standardized)", ylab ="Cumulative Proportion of Variance Explained",ylim=c(0,1),type="b")
+``` 
+
+## Princiapl Component Regression
+
+```{r}
+#install.packages("pls")
+loadPkg(pls)
+#install.packages("mice")
+loadPkg(mice)
+pcr.fit=pcr(imdb_score~.,data=movies_df,scale=TRUE,validation ="CV")
+```
+
+```{r, results='show', include=T}
+pcr.fit$coefficients[1:15,1,'1 comps'] 
+```
+
+```{r}
+moviesscaled.pc = PCRxform(moviesscale,"imdb_score",TRUE) 
+```
+
+**Validations**
+
+We can check and see where are mean square error prediction is the lowest
+
+```{r}
+validationplot(pcr.fit ,val.type="MSEP",legend="topright")
+```
+
+# Modeling
+
+After the initial analysis, various insights and associations between the variables were found. Since most of the variables are numeric, it is easy to build a linear regression model.The goal is to fit a predictive model to an observed data set of dependent i.e. gross, and exploratory variables. After developing a model if we use exploratory variables on it, then it should predict the value of gross with minimum error.
+
+## Linear Regression
+
+Linear regression, which is the most basic type of regression is used for predicting movie ratings. Linear regression can be used in studying relationship between two variables namely dependent and independent. In predicting movie ratings, we use imdb_score to be the dependent attribute and set the all numeric attributes to be independent variables. Csv file is read and set of all numeric attributes are extracted. Missing records are removed in order to minimize error and data is scaled as required. Different folds of training and test data sets are used. Model is created for linear regression using training data. Model created is applied to test data to obtain predictions. Root mean square error is estimated. Graph is plotted between actual and predicted data.
+
+I have used generalized linear model (glm()) as the function that tells R to run a generalized linear model.Using RMSE makes a lot more sense when error term is distributed normally with mean zero.
+
+A well-fitting regression model results in predicted values close to the observed data values. The mean model, which uses the mean for every predicted value, generally would be used if there were no informative predictor variables. The fit of a proposed regression model should therefore be better than the fit of the mean model. Three statistics are used in Ordinary Least Squares (OLS) regression to evaluate model fit: R-squared, the overall F-test, and the Root Mean Square Error (RMSE). All three are based on two sums of squares: Sum of Squares Total (SST) and Sum of Squares Error (SSE). SST measures how far the data are from the mean, and SSE measures how far the data are from the model’s predicted values. Different combinations of these two values provide different information about how the regression model compares to the mean model.
+
+The RMSE is the square root of the variance of the residuals. It indicates the absolute fit of the model to the data–how close the observed data points are to the model’s predicted values. Whereas R-squared is a relative measure of fit, RMSE is an absolute measure of fit. As the square root of a variance, RMSE can be interpreted as the standard deviation of the unexplained variance, and has the useful property of being in the same units as the response variable. Lower values of RMSE indicate better fit. RMSE is a good measure of how accurately the model predicts the response, and it is the most important criterion for fit if the main purpose of the model is prediction.
+
+```{r}
+# get the set of numeric attributes
+numeric_attributes<-sapply(movies,is.numeric)
+
+#attributes containing only numeric data
+movies_numeric <- movies[,numeric_attributes]
+
+#removing missing values
+movies_missing_removed <- na.omit(movies_numeric)
+
+
+#movie_data scaled
+scaled_movie_data <- data.frame(lapply(movies_missing_removed, function(x) scale(x, center = FALSE, scale = max(x, na.rm = TRUE))))  
+
+index_start<- 1:nrow(scaled_movie_data)
+
+#For 50-50
+#splitting into training and test data 
+index_test50 <- sample(index_start, trunc(length(index_start)*0.50))
+test_data50 <- scaled_movie_data[index_test50,]
+
+index_train50 <- sample(index_start, trunc(length(index_start)*0.50))
+
+train_data50 <- scaled_movie_data[index_train50,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data50)
+
+#applying the model created on test data to obtain predictions
+linear_predictions1 <- predict(linear_model, test_data50)
+
+#plot(linear_predictions,test_data50$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data50$imdb_score - linear_predictions1)^2) 
+
+
+#For 60-40
+#splitting into training and test data 
+index_test40 <- sample(index_start, trunc(length(index_start)*0.40))
+test_data40 <- scaled_movie_data[index_test40,]
+
+index_train60 <- sample(index_start, trunc(length(index_start)*0.60))
+
+train_data60 <- scaled_movie_data[index_train60,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data60)
+
+#applying the model created on test data to obtain predictions
+linear_predictions2 <- predict(linear_model, test_data40)
+
+#plot(linear_predictions,test_data40$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data40$imdb_score - linear_predictions2)^2) 
+
+#For 75-25
+#splitting into training and test data 
+index_test25 <- sample(index_start, trunc(length(index_start)*0.25))
+test_data25 <- scaled_movie_data[index_test25,]
+
+index_train75 <- sample(index_start, trunc(length(index_start)*0.75))
+
+train_data75 <- scaled_movie_data[index_train75,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data75)
+
+#applying the model created on test data to obtain predictions
+linear_predictions3 <- predict(linear_model, test_data25)
+
+#plot(linear_predictions,test_data25$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data25$imdb_score - linear_predictions3)^2) 
+
+
+#For 80-20
+#splitting into training and test data 
+index_test20 <- sample(index_start, trunc(length(index_start)*0.20))
+test_data20 <- scaled_movie_data[index_test20,]
+
+index_train80 <- sample(index_start, trunc(length(index_start)*0.80))
+
+train_data80 <- scaled_movie_data[index_train80,]
+
+
+#create model using linear regression
+
+linear_model <-glm(imdb_score ~., data = train_data80)
+
+#applying the model created on test data to obtain predictions
+linear_predictions4 <- predict(linear_model, test_data20)
+
+#plot(linear_predictions,test_data20$imdb_score,col=c("red","green"), xlab="Predicted",ylab="Actual")
+
+#root mean square error
+mean((test_data20$imdb_score - linear_predictions4)^2) 
+
+par(mfrow=c(2,2))
+plot(linear_predictions1,test_data50$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual", main="Test data 50")
+plot(linear_predictions2,test_data40$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual", main= "Test data 40")
+plot(linear_predictions3,test_data25$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual", main="Test data 25")
+plot(linear_predictions4,test_data20$imdb_score,col=rainbow(2), xlab="Predicted",ylab="Actual",main="Test data 20")
+
+```
+
+## Support vector Regression
+
+Support Vector Machine (SVM) can also be used as a regression technique, maintaining all the main features that characterize the algorithm (maximal margin). SVR uses the same principles as SVM for the classification process and is found to be more robust as it individualizes the hyperplane maximizing the margin, keeping in mind that part of the error is tolerated. Its support for kernels makes it a suitable model for nonlinear functions, meaning SVR does not depend on distributions of the underlying dependent and independent variables. Instead the SVR technique depends on kernel functions. 
+
+We modelled SVR using certain critical variables as seen from correlation analysis like "IMDb_score", "director_facebook_likes", "duration", "actor_1_facebook_likes", "actor_2_facebook_likes", "actor_3_facebook_likes", "facenumber_in_poster", "budget" and we omitted the variables that are not applicable for prediction. 
+
+```{r}
+library("e1071")
+
+# Convert title_year from numeric to factor type since we don't consider this attribute for prediction
+movies$title_year = as.factor(movies$title_year)
+
+#Extract only the numeric data columns
+number_attributes <- sapply(movies,is.numeric)
+number_attributes
+movies_num <- movies[,number_attributes]     # movies_num contains only numeric data
+hist(movies$imdb_score, breaks=30)
+plot(density(movies$imdb_score))
+abline(v=mean(movies$imdb_score), lty=2)  
+
+# Now we know that most scores lie between somewhere close to 6 and 7.5
+movies_1 <- na.omit(movies_num)    #Remove the rows with missing values
+scaled_data <- data.frame(lapply(movies_1, function(x) scale(x, center = FALSE, scale = max(x, na.rm = TRUE))))                         #Scale the data
+scaled_data$imdb_score = movies_1$imdb_score / 10
+scaled_data <- scaled_data[,c("imdb_score","director_facebook_likes","duration","actor_1_facebook_likes","actor_2_facebook_likes","actor_3_facebook_likes","facenumber_in_poster","budget")]
+
+index<- 1:nrow(scaled_data)
+index_test <- sample(index, trunc(length(index)*0.25))
+index_test1 <- sample(index, trunc(length(index)*0.2))
+index_test2 <- sample(index, trunc(length(index)*0.4))
+index_test3 <- sample(index, trunc(length(index)*0.5))
+# Split the data to train and test set
+test_data <- scaled_data[index_test,]
+train_data <- scaled_data[-index_test,]
+
+# Create a model using SVM
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "radial")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "linear")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "sigmoid")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "polynomial")
+#svm_pred <-svm(imdb_score ~., data = train_data, kernel = "radial", gamma = 0.5)
+svm_pred <-svm(imdb_score ~., data = train_data, kernel = "radial", gamma = 0.7)
+# Apply the model on test data and get the predicted values
+svm_predictions <- predict(svm_pred, test_data[,-1])
+mean((test_data$imdb_score - svm_predictions)^2)     # Get the mean squared error
+
+test_data1 <- scaled_data[index_test1,]
+train_data1 <- scaled_data[-index_test1,]
+svm_pred1 <-svm(imdb_score ~., data = train_data1, kernel = "radial", gamma = 0.7)
+svm_predictions1 <- predict(svm_pred1, test_data1[,-1])
+mean((test_data1$imdb_score - svm_predictions1)^2)
+
+test_data2 <- scaled_data[index_test2,]
+train_data2 <- scaled_data[-index_test2,]
+svm_pred2 <-svm(imdb_score ~., data = train_data2, kernel = "radial", gamma = 0.7)
+svm_predictions2 <- predict(svm_pred2, test_data2[,-1])
+mean((test_data2$imdb_score - svm_predictions2)^2)
+
+test_data3 <- scaled_data[index_test3,]
+train_data3 <- scaled_data[-index_test3,]
+svm_pred3 <-svm(imdb_score ~., data = train_data3, kernel = "radial", gamma = 0.7)
+svm_predictions3 <- predict(svm_pred3, test_data3[,-1])
+mean((test_data3$imdb_score - svm_predictions3)^2)
+
+# Plot the predicted values v/s actual values
+par(mfrow = c(2,2))
+plot(svm_predictions,test_data$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 75% Test 25%")
+plot(svm_predictions1,test_data1$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 80% Test 20%")
+plot(svm_predictions2,test_data2$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 60% Test 40%")
+plot(svm_predictions3,test_data3$imdb_score,col=c("red","blue"), xlab="Predicted",ylab="Actual", main="Train 50% Test 50%")
+```
+
+# Key Insights
+
+**Budget is important, although there is no strong correlation between budget and movie rating.**
+
+**The facebook popularity of director is an important factor to affect a movie rating.**
+
+**The facebook popularity of the top 3 actors/actresses is important.**
+
+# Conclusion
+
+In conclusion, this analysis compares certain attributes regarding Facebook likes and  against the IMDB site of a film. The higher number of Facebook likes from the primary actor and supporting actors plays a significant role in success of a film. Through both models and the EDA, someone can easily see the support in
+this conclusion. Directors and producers can take this dataset and implement it into their thought process when planning their movie. Movie-goers can use this dataset to make the same predictions once the movie is announced with
+primary and supporting actors/actresses. It could possibly save movie-goers money when debating on whether to go see a movie or not.
+
+# Future Prospects
+
+Correlating success of songs to success of movie and other social media platforms like twitter and their “structure” of retweets and “favorited” tweets
+
+
+# Bibliography
+
+IEEE xplore. Retrieved from
+https://ieeexplore.ieee.org/document/8204173/references#references
+
+Data world Dataset. Retrieved from 
+https://data.world/data-society/imdb-5000-movie-dataset
+
+Stack overflow. Retrieved from
+https://stackoverflow.com/questions/55340375/how-do-i-use-themes-for-r-markdown-with-github-document-as-output
+
